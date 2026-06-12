@@ -20,6 +20,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pandas as pd
+
 import dispersion_lib as dl
 
 START = "1994-01-01"          # 12M horizon means usable data starts ~1995
@@ -51,7 +53,11 @@ def main() -> None:
 
     print("Building charts...")
     dl.build_equal_weighted_charts(combined, spx, OUT_DIR)
-    print("Done. Open output/regime_dashboard.html to start.")
+    cw_path = DATA_DIR / "capweighted_dispersion.csv"
+    cw = (pd.read_csv(cw_path, index_col="date", parse_dates=True)
+          if cw_path.exists() else None)
+    dl.build_index_dashboard(combined, cw, spx, OUT_DIR)
+    print("Done. Open output/index.html to start.")
 
 
 if __name__ == "__main__":

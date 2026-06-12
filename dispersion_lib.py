@@ -320,76 +320,246 @@ def compute_equal_weighted_metrics(prices: pd.DataFrame,
 
 
 # ---------------------------------------------------------------------------
-# Chart builders (write standalone HTML files)
+# Chart builders (write standalone HTML files + combined index dashboard)
 # ---------------------------------------------------------------------------
 
-def build_equal_weighted_charts(df: pd.DataFrame, spx: pd.Series,
-                                out_dir) -> None:
-    """Rebuild every equal-weighted chart from the canonical metrics frame."""
-    from pathlib import Path
-
-    out = Path(out_dir)
-    out.mkdir(exist_ok=True)
+def _equal_weighted_figures(df: pd.DataFrame, spx: pd.Series) -> list[tuple[str, "go.Figure"]]:
+    """(filename-stem, figure) pairs for every equal-weighted chart."""
     horizons = list(HORIZONS)
+    figs = []
+
+    figs.append(("regime_dashboard", plot_regime_dashboard(
+        dispersion=df["spread_12M"], corr=df["avg_pairwise_corr"].dropna(),
+        vol_disp=df["vol_xs_std"], benchmark=spx)))
 
     spread = df[[f"spread_{h}" for h in horizons]]
     spread = spread.rename(columns=lambda c: c.replace("spread_", ""))
-    plot_dispersion(
+    figs.append(("eq_decile_spread", plot_dispersion(
         spread, "Equal-weighted return dispersion - top 10% minus bottom 10%",
-        "Decile spread", benchmark=spx,
-    ).write_html(out / "eq_decile_spread.html", include_plotlyjs="cdn")
+        "Decile spread", benchmark=spx)))
 
     xs = df[[f"xs_std_{h}" for h in horizons]]
     xs = xs.rename(columns=lambda c: c.replace("xs_std_", ""))
-    plot_dispersion(
+    figs.append(("eq_xs_std", plot_dispersion(
         xs, "Equal-weighted cross-sectional std of returns",
-        "Cross-sectional std", benchmark=spx,
-    ).write_html(out / "eq_xs_std.html", include_plotlyjs="cdn")
+        "Cross-sectional std", benchmark=spx)))
 
-    plot_dispersion(
+    figs.append(("eq_robust_dispersion", plot_dispersion(
         df[["mad_12M", "idr_12M"]].rename(
             columns={"mad_12M": "MAD (12M)", "idr_12M": "P90-P10 (12M)"}),
-        "Robust dispersion measures, 12M horizon", "Dispersion", benchmark=spx,
-    ).write_html(out / "eq_robust_dispersion.html", include_plotlyjs="cdn")
+        "Robust dispersion measures, 12M horizon", "Dispersion", benchmark=spx)))
 
-    plot_dispersion(
+    figs.append(("pairwise_correlation", plot_dispersion(
         df[["avg_pairwise_corr"]].rename(
             columns={"avg_pairwise_corr": "Avg pairwise corr (126d)"}),
         "Average pairwise correlation across S&P 500 constituents",
-        "Correlation", benchmark=spx,
-    ).write_html(out / "pairwise_correlation.html", include_plotlyjs="cdn")
+        "Correlation", benchmark=spx)))
 
-    plot_dispersion(
+    figs.append(("vol_dispersion", plot_dispersion(
         df[["avg_vol", "vol_xs_std", "vol_idr"]],
         "Cross-sectional volatility metrics (21d realized vol)",
-        "Annualized vol", benchmark=spx,
-    ).write_html(out / "vol_dispersion.html", include_plotlyjs="cdn")
-
-    plot_regime_dashboard(
-        dispersion=df["spread_12M"], corr=df["avg_pairwise_corr"].dropna(),
-        vol_disp=df["vol_xs_std"], benchmark=spx,
-    ).write_html(out / "regime_dashboard.html", include_plotlyjs="cdn")
+        "Annualized vol", benchmark=spx)))
+    return figs
 
 
-def build_cap_weighted_charts(hist: pd.DataFrame, out_dir) -> None:
-    """Rebuild cap-weighted charts from the accumulated daily CSV."""
+def _cap_weighted_figures(hist: pd.DataFrame) -> list[tuple[str, "go.Figure"]]:
+    """(filename-stem, figure) pairs for the cap-weighted charts."""
+    spread_cols = [c for c in hist.columns if c.startswith("cw_spread_")]
+    std_cols = [c for c in hist.columns if c.startswith("cw_xs_std_")]
+    return [
+        ("cap_weighted_dispersion", plot_dispersion(
+            hist[spread_cols].rename(columns=lambda c: c.replace("cw_spread_", "")),
+            "Cap-weighted return dispersion - top 10% minus bottom 10% "
+            "(dataset accumulates daily)", "Decile spread")),
+        ("cap_weighted_xs_std", plot_dispersion(
+            hist[std_cols].rename(columns=lambda c: c.replace("cw_xs_std_", "")),
+            "Cap-weighted cross-sectional std of returns",
+            "Cross-sectional std")),
+    ]
+
+
+def build_equal_weighted_charts(df: pd.DataFrame, spx: pd.Series,
+                                out_dir) -> None:
+    """Rebuild every standalone equal-weighted chart file."""
     from pathlib import Path
 
     out = Path(out_dir)
     out.mkdir(exist_ok=True)
-    spread_cols = [c for c in hist.columns if c.startswith("cw_spread_")]
-    std_cols = [c for c in hist.columns if c.startswith("cw_xs_std_")]
-    plot_dispersion(
-        hist[spread_cols].rename(columns=lambda c: c.replace("cw_spread_", "")),
-        "Cap-weighted return dispersion - top 10% minus bottom 10% "
-        "(dataset accumulates daily)",
-        "Decile spread",
-    ).write_html(out / "cap_weighted_dispersion.html", include_plotlyjs="cdn")
-    plot_dispersion(
-        hist[std_cols].rename(columns=lambda c: c.replace("cw_xs_std_", "")),
-        "Cap-weighted cross-sectional std of returns",
-        "Cross-sectional std",
-    ).write_html(out / "cap_weighted_xs_std.html", include_plotlyjs="cdn")
+    for name, fig in _equal_weighted_figures(df, spx):
+        fig.write_html(out / f"{name}.html", include_plotlyjs="cdn")
+
+
+def build_cap_weighted_charts(hist: pd.DataFrame, out_dir) -> None:
+    """Rebuild standalone cap-weighted chart files from the daily CSV."""
+    from pathlib import Path
+
+    out = Path(out_dir)
+    out.mkdir(exist_ok=True)
+    for name, fig in _cap_weighted_figures(hist):
+        fig.write_html(out / f"{name}.html", include_plotlyjs="cdn")
+
+
+# ---------------------------------------------------------------------------
+# Combined single-page dashboard (output/index.html)
+# ---------------------------------------------------------------------------
+
+def _stat_row(s: pd.Series) -> dict | None:
+    """Latest value plus regime context for one metric series."""
+    s = s.dropna()
+    if s.empty:
+        return None
+    latest = float(s.iloc[-1])
+    p3 = regime_percentile(s)
+    z3 = zscore(s)
+    return {
+        "latest": latest,
+        "pct_3y": float(p3.iloc[-1]) if pd.notna(p3.iloc[-1]) else np.nan,
+        "z_3y": float(z3.iloc[-1]) if pd.notna(z3.iloc[-1]) else np.nan,
+        "pct_full": float((s.iloc[:-1] < latest).mean()) if len(s) > 1 else np.nan,
+    }
+
+
+def _fmt(x, kind: str) -> str:
+    if x is None or (isinstance(x, float) and np.isnan(x)):
+        return "&ndash;"
+    if kind == "pct":
+        return f"{x:.1%}"
+    if kind == "rank":
+        return f"{x:.0%}"
+    return f"{x:+.2f}"
+
+
+def _summary_table_html(ew: pd.DataFrame, cw: pd.DataFrame | None) -> str:
+    rows = []
+
+    def add(label, series, group):
+        st = _stat_row(series)
+        if st is None:
+            return
+        hot = ' class="hot"' if (pd.notna(st["pct_3y"]) and st["pct_3y"] >= 0.9) else ""
+        cold = ' class="cold"' if (pd.notna(st["pct_3y"]) and st["pct_3y"] <= 0.1) else ""
+        rows.append(
+            f"<tr{hot or cold}><td>{group}</td><td>{label}</td>"
+            f"<td>{_fmt(st['latest'], 'pct')}</td>"
+            f"<td>{_fmt(st['pct_3y'], 'rank')}</td>"
+            f"<td>{_fmt(st['z_3y'], 'z')}</td>"
+            f"<td>{_fmt(st['pct_full'], 'rank')}</td></tr>"
+        )
+
+    for h in HORIZONS:
+        add(f"Decile spread {h}", ew[f"spread_{h}"], "Equal-weighted")
+    for h in HORIZONS:
+        add(f"Cross-sectional std {h}", ew[f"xs_std_{h}"], "Equal-weighted")
+    add("MAD 12M", ew["mad_12M"], "Equal-weighted")
+    add("P90&ndash;P10 12M", ew["idr_12M"], "Equal-weighted")
+    add("Avg pairwise corr (126d)", ew["avg_pairwise_corr"], "Correlation")
+    add("Avg stock vol (21d)", ew["avg_vol"], "Volatility")
+    add("Vol dispersion (xs std)", ew["vol_xs_std"], "Volatility")
+
+    if cw is not None and len(cw):
+        for h in HORIZONS:
+            col = f"cw_spread_{h}"
+            if col in cw:
+                add(f"Decile spread {h}", cw[col], "Cap-weighted")
+        for h in HORIZONS:
+            col = f"cw_xs_std_{h}"
+            if col in cw:
+                add(f"Cross-sectional std {h}", cw[col], "Cap-weighted")
+
+    return (
+        '<table><thead><tr><th>Group</th><th>Metric</th><th>Latest</th>'
+        '<th>3y %ile</th><th>3y z-score</th><th>Full-history %ile</th>'
+        "</tr></thead><tbody>" + "".join(rows) + "</tbody></table>"
+    )
+
+
+_INDEX_CSS = """
+body{font-family:-apple-system,Segoe UI,Helvetica,Arial,sans-serif;margin:0;
+     background:#fafafa;color:#222}
+header{background:#fff;border-bottom:1px solid #e3e3e3;padding:18px 28px;
+       position:sticky;top:0;z-index:10}
+header h1{margin:0;font-size:20px}
+header .asof{color:#777;font-size:13px;margin-top:4px}
+nav{margin-top:8px;font-size:13px}
+nav a{margin-right:14px;color:#1f77b4;text-decoration:none}
+nav a:hover{text-decoration:underline}
+main{max-width:1200px;margin:0 auto;padding:20px 28px 60px}
+section{background:#fff;border:1px solid #e6e6e6;border-radius:8px;
+        margin:22px 0;padding:10px 14px}
+h2{font-size:16px;margin:6px 4px 10px}
+table{border-collapse:collapse;width:100%;font-size:13px}
+th,td{padding:6px 10px;text-align:right;border-bottom:1px solid #eee}
+th:first-child,td:first-child,th:nth-child(2),td:nth-child(2){text-align:left}
+thead th{border-bottom:2px solid #ccc}
+tr.hot td{background:#fdecea}
+tr.cold td{background:#e8f1fb}
+.note{color:#777;font-size:12px;margin:8px 4px}
+.dl a{margin-right:16px;font-size:13px;color:#1f77b4}
+"""
+
+
+def build_index_dashboard(ew: pd.DataFrame, cw: pd.DataFrame | None,
+                          spx: pd.Series, out_dir) -> None:
+    """One self-contained page: summary stats table + every chart.
+
+    Written to <out_dir>/index.html (so enabling GitHub Pages on the repo
+    serves it directly). plotly.js is loaded once from the CDN and shared by
+    all figures on the page.
+    """
+    from pathlib import Path
+
+    out = Path(out_dir)
+    out.mkdir(exist_ok=True)
+
+    sections = _equal_weighted_figures(ew, spx)
+    if cw is not None and len(cw):
+        sections += _cap_weighted_figures(cw)
+
+    nav, body, first = [], [], True
+    for name, fig in sections:
+        title = fig.layout.title.text or name
+        nav.append(f'<a href="#{name}">{title.split(" - ")[0]}</a>')
+        inner = fig.to_html(full_html=False, div_id=name + "_plot",
+                            include_plotlyjs="cdn" if first else False,
+                            default_height="560px"
+                            if name != "regime_dashboard" else "1100px")
+        first = False
+        body.append(f'<section id="{name}">{inner}</section>')
+
+    asof = ew.index.max()
+    cw_note = ""
+    if cw is not None and len(cw):
+        cw_note = (f'<p class="note">Cap-weighted history accumulating since '
+                   f'{cw.index.min().date()} ({len(cw)} trading days); regime '
+                   f'percentiles appear once enough history builds up.</p>')
+
+    html = f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>S&amp;P 500 Dispersion Monitor</title>
+<style>{_INDEX_CSS}</style></head>
+<body>
+<header>
+  <h1>S&amp;P 500 Dispersion Monitor</h1>
+  <div class="asof">Data through {asof.date()} &middot; {int(ew["n_stocks"].iloc[-1])} constituents</div>
+  <nav><a href="#summary">Summary</a>{''.join(nav)}</nav>
+</header>
+<main>
+<section id="summary">
+  <h2>Latest readings &amp; regime context</h2>
+  {_summary_table_html(ew, cw)}
+  <p class="note">3y %ile / z-score: latest value vs trailing 756 trading days.
+  Rows shaded red are in the top decile of their 3-year range (high-dispersion
+  regime); blue rows are in the bottom decile (compressed regime).</p>
+  {cw_note}
+  <p class="dl">Datasets:
+    <a href="../data/equal_weighted_dispersion.csv">equal_weighted_dispersion.csv</a>
+    <a href="../data/capweighted_dispersion.csv">capweighted_dispersion.csv</a>
+  </p>
+</section>
+{''.join(body)}
+</main></body></html>"""
+    (out / "index.html").write_text(html, encoding="utf-8")
 
 
 _COLORS = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b"]

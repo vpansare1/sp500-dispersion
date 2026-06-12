@@ -15,7 +15,10 @@ daily_update.py               daily GH Action: appends the cap-weighted row,
 .github/workflows/            daily cron (07:00 UTC = 2am EST / 3am EDT)
 data/                         CSV datasets (committed by the action)
 data/market_caps/             daily market-cap snapshots (gzip CSV)
-output/                       standalone plotly HTML charts
+output/                       standalone plotly HTML charts + index.html
+                              (single-page dashboard: summary stats table
+                              with 3y percentile/z-score regime context,
+                              all charts, CSV links)
 ```
 
 ## Quick start
@@ -38,6 +41,12 @@ recompute anything later under different definitions.
 
 If you skip the local backfill, the action still works -- the equal-weighted
 series just starts from ~today instead of 1995.
+
+`output/index.html` is the everything-in-one-page view (regenerated on every
+run). To publish it, enable GitHub Pages (Settings -> Pages -> deploy from
+branch -> main, root folder) and browse to
+`https://<you>.github.io/<repo>/output/`. Serving from the repo root keeps
+the dashboard's relative CSV download links working.
 
 ## Dispersion definitions
 

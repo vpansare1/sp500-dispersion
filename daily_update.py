@@ -147,6 +147,7 @@ def main() -> int:
         spx = cached.iloc[:, 0].rename("S&P 500")
     dl.build_cap_weighted_charts(cw_hist, OUT_DIR)
     dl.build_equal_weighted_charts(ew_hist, spx, OUT_DIR)
+    dl.build_index_dashboard(ew_hist, cw_hist, spx, OUT_DIR)
 
     print("Daily update complete.")
     return 0

@@ -347,7 +347,10 @@ def _equal_weighted_figures(df: pd.DataFrame, spx: pd.Series) -> list[tuple[str,
     figs.append(("eq_robust_dispersion", plot_dispersion(
         df[["mad_12M", "idr_12M"]].rename(
             columns={"mad_12M": "MAD (12M)", "idr_12M": "P90-P10 (12M)"}),
-        "Robust dispersion measures, 12M horizon", "Dispersion", benchmark=spx)))
+        "Robust dispersion measures, 12M horizon", "Dispersion", benchmark=spx,
+        subtitle="'Robust' = insensitive to outliers: a few extreme movers barely shift these,<br>"
+                 "unlike the decile spread/std. MAD = median absolute deviation of constituent "
+                 "returns from the median; P90-P10 = 90th minus 10th percentile return.")))
 
     figs.append(("pairwise_correlation", plot_dispersion(
         df[["avg_pairwise_corr"]].rename(
@@ -494,8 +497,59 @@ thead th{border-bottom:2px solid #ccc}
 tr.hot td{background:#fdecea}
 tr.cold td{background:#e8f1fb}
 .note{color:#777;font-size:12px;margin:8px 4px}
+.desc{color:#555;font-size:13px;line-height:1.5;margin:6px 6px 2px;
+      max-width:980px}
 .dl a{margin-right:16px;font-size:13px;color:#1f77b4}
 """
+
+
+_CHART_DESCRIPTIONS = {
+    "regime_dashboard":
+        "The overview: index level, 12M return dispersion (red segments mark "
+        "top-decile dispersion regimes vs the trailing 3 years), average "
+        "pairwise correlation, and vol dispersion on one shared time axis. "
+        "Reading the combination: low correlation + high dispersion is a "
+        "stock-picker's / late-bubble market; high correlation + high "
+        "dispersion is a macro panic.",
+    "eq_decile_spread":
+        "Mean return of the top 10% of constituents minus the bottom 10%, "
+        "ranked by realized return over each horizon, equal-weighted. "
+        "Intuitive but tail-driven: a small cohort of extreme movers can "
+        "dominate it.",
+    "eq_xs_std":
+        "Standard deviation of all ~500 constituent returns on each date. "
+        "Uses the whole return distribution rather than just the tails; the "
+        "standard industry definition of dispersion and the recommended "
+        "primary series.",
+    "eq_robust_dispersion":
+        "\"Robust\" means insensitive to outliers: these measures barely move "
+        "when a handful of stocks make extreme moves, unlike the decile "
+        "spread or std. MAD is the median absolute deviation of constituent "
+        "returns from the cross-sectional median; P90&ndash;P10 is the 90th minus "
+        "10th percentile return. When the decile spread rises but these "
+        "don't, the action is concentrated in a few names; when all rise "
+        "together, the whole market is genuinely differentiating.",
+    "pairwise_correlation":
+        "Average correlation between every pair of constituents, computed "
+        "exactly over rolling 126-day windows of daily returns. The mirror "
+        "image of dispersion \u2014 divergences between the two are themselves "
+        "a signal.",
+    "vol_dispersion":
+        "Cross-sectional spread of 21-day realized volatilities: average "
+        "single-stock vol, the std of vols across names, and the P90&ndash;P10 "
+        "vol range. Spikes when a subset of the market decouples (dot-com, "
+        "meme stocks, AI names) even while index vol stays calm \u2014 often "
+        "leads return dispersion.",
+    "cap_weighted_dispersion":
+        "Same decile-spread construction, but returns within each decile are "
+        "market-cap weighted. Built forward one row per day by the GitHub "
+        "Action (historical cap weights aren't freely available), so this "
+        "series starts at the first action run and grows daily.",
+    "cap_weighted_xs_std":
+        "Cap-weighted cross-sectional std: \u221a\u03a3w\u1d62(r\u1d62\u2212r_index)\u00b2 \u2014 the "
+        "realized analogue of the CBOE DSPX dispersion index. Accumulates "
+        "daily alongside the chart above.",
+}
 
 
 def build_index_dashboard(ew: pd.DataFrame, cw: pd.DataFrame | None,
@@ -524,7 +578,9 @@ def build_index_dashboard(ew: pd.DataFrame, cw: pd.DataFrame | None,
                             default_height="560px"
                             if name != "regime_dashboard" else "1100px")
         first = False
-        body.append(f'<section id="{name}">{inner}</section>')
+        desc = _CHART_DESCRIPTIONS.get(name, "")
+        desc_html = f'<p class="desc">{desc}</p>' if desc else ""
+        body.append(f'<section id="{name}">{desc_html}{inner}</section>')
 
     asof = ew.index.max()
     cw_note = ""
@@ -567,8 +623,13 @@ _COLORS = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b"]
 
 def plot_dispersion(df: pd.DataFrame, title: str, yaxis_title: str = "Dispersion",
                     benchmark: pd.Series | None = None,
-                    benchmark_name: str = "S&P 500") -> "go.Figure":
-    """Multi-horizon dispersion lines, optional index level on a log right axis."""
+                    benchmark_name: str = "S&P 500",
+                    subtitle: str | None = None) -> "go.Figure":
+    """Multi-horizon dispersion lines, optional index level on a log right axis.
+
+    Header layout (top to bottom, non-overlapping): title [+ subtitle],
+    legend row, range-selector buttons, then the plot.
+    """
     import plotly.graph_objects as go
 
     fig = go.Figure()
@@ -585,17 +646,28 @@ def plot_dispersion(df: pd.DataFrame, title: str, yaxis_title: str = "Dispersion
         ))
         fig.update_layout(yaxis2=dict(title=benchmark_name, overlaying="y",
                                       side="right", type="log", showgrid=False))
+    title_block = dict(text=title, yref="container", yanchor="top", y=0.985)
+    if subtitle:
+        title_block["subtitle"] = dict(text=subtitle,
+                                       font=dict(size=12, color="#666"))
     fig.update_layout(
-        title=title, template="plotly_white", hovermode="x unified",
+        title=title_block, template="plotly_white", hovermode="x unified",
         yaxis=dict(title=yaxis_title, tickformat=".1%"),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
-        xaxis=dict(rangeslider=dict(visible=True), rangeselector=dict(buttons=[
-            dict(count=1, label="1y", step="year", stepmode="backward"),
-            dict(count=5, label="5y", step="year", stepmode="backward"),
-            dict(count=10, label="10y", step="year", stepmode="backward"),
-            dict(step="all"),
-        ])),
-        margin=dict(t=80),
+        # one header row above the plot: range-selector buttons on the left,
+        # legend right-aligned -- vertically separated from the title at any
+        # window height (a stacked layout drifts because paper coordinates
+        # scale with plot height)
+        legend=dict(orientation="h", yanchor="bottom", y=1.03,
+                    xanchor="right", x=1),
+        xaxis=dict(rangeslider=dict(visible=True), rangeselector=dict(
+            x=0, xanchor="left", y=1.03, yanchor="bottom",
+            buttons=[
+                dict(count=1, label="1y", step="year", stepmode="backward"),
+                dict(count=5, label="5y", step="year", stepmode="backward"),
+                dict(count=10, label="10y", step="year", stepmode="backward"),
+                dict(step="all"),
+            ])),
+        margin=dict(t=140 if subtitle else 115),
     )
     return fig
 
@@ -642,6 +714,9 @@ def plot_regime_dashboard(dispersion: pd.Series, corr: pd.Series,
     fig.update_yaxes(tickformat=".0%", row=4, col=1)
 
     fig.update_layout(template="plotly_white", height=1100, hovermode="x unified",
-                      title="S&P 500 dispersion regime dashboard",
-                      legend=dict(orientation="h", y=1.03, x=0), showlegend=True)
+                      title=dict(text="S&P 500 dispersion regime dashboard",
+                                 yref="container", yanchor="top", y=0.992),
+                      legend=dict(orientation="h", yanchor="bottom", y=1.022,
+                                  xanchor="right", x=1),
+                      margin=dict(t=110), showlegend=True)
     return fig

@@ -47,8 +47,16 @@ def _read_csv(path: Path) -> pd.DataFrame | None:
 
 
 def update_cap_weighted(prices: pd.DataFrame, caps: pd.Series,
-                        members: pd.DataFrame) -> pd.DataFrame:
-    """Append today's cap-weighted row (idempotent) and archive market caps."""
+                        members: pd.DataFrame,
+                        archive_caps: bool = True) -> pd.DataFrame:
+    """Compute the cap-weighted row for the LAST date in `prices` (idempotent
+    overwrite) and, unless disabled, archive the market-cap snapshot.
+
+    For a recompute of a historical date, pass a `prices` window ending on that
+    date. Note: market caps are current (historical caps aren't freely
+    available), so a recomputed cap-weighted row uses today's weights as an
+    approximation -- the equal-weighted columns in the same row are exact.
+    """
     asof = prices.index[-1]
     row: dict[str, float] = {}
     for label, window in dl.HORIZONS.items():
@@ -73,18 +81,25 @@ def update_cap_weighted(prices: pd.DataFrame, caps: pd.Series,
     else:
         hist = new
     hist.to_csv(CW_CSV, float_format="%.6f")
-    print(f"cap-weighted dataset: {len(hist)} rows")
+    print(f"cap-weighted dataset: {len(hist)} rows"
+          f" (row for {asof.date()} written)")
 
-    snap = members.set_index("ticker").join(caps).dropna(subset=["market_cap"])
-    snap.to_csv(CAPS_DIR / f"{asof.date()}.csv.gz", compression="gzip")
+    if archive_caps:
+        snap = members.set_index("ticker").join(caps).dropna(subset=["market_cap"])
+        snap.to_csv(CAPS_DIR / f"{asof.date()}.csv.gz", compression="gzip")
     return hist
 
 
-def update_equal_weighted(prices: pd.DataFrame) -> pd.DataFrame:
-    """Compute equal-weighted metrics over the trailing window and append all
-    rows newer than the existing CSV (self-healing across missed runs)."""
+def update_equal_weighted(prices: pd.DataFrame,
+                          overwrite_dates: pd.DatetimeIndex | None = None) -> pd.DataFrame:
+    """Compute equal-weighted metrics over the trailing window and merge into
+    the stored CSV.
+
+    Normal mode: append all rows newer than the existing CSV max
+    (self-healing across missed runs). If `overwrite_dates` is given, rows for
+    those dates are recomputed from current prices and overwrite the stored
+    values (used by --recompute-date to fix stale rows)."""
     combined = dl.compute_equal_weighted_metrics(prices, corr_step=1)
-    # keep rows where at least the 1M cross-section exists
     combined = combined.dropna(subset=["spread_1M"])
 
     hist = _read_csv(EW_CSV)
@@ -94,10 +109,17 @@ def update_equal_weighted(prices: pd.DataFrame) -> pd.DataFrame:
               "locally for the full ~30y history.", file=sys.stderr)
         merged = combined
     else:
-        new = combined.loc[combined.index > hist.index.max()]
-        merged = pd.concat([hist, new[hist.columns.intersection(new.columns)]])
-        merged = merged[~merged.index.duplicated(keep="last")].sort_index()
-        print(f"equal-weighted dataset: +{len(new)} rows -> {len(merged)} total")
+        cols = hist.columns.intersection(combined.columns)
+        if overwrite_dates is not None:
+            repl = combined.loc[combined.index.isin(overwrite_dates), cols]
+            merged = pd.concat([hist, repl])
+            merged = merged[~merged.index.duplicated(keep="last")].sort_index()
+            print(f"equal-weighted dataset: recomputed {len(repl)} row(s)")
+        else:
+            new = combined.loc[combined.index > hist.index.max()]
+            merged = pd.concat([hist, new[cols]])
+            merged = merged[~merged.index.duplicated(keep="last")].sort_index()
+            print(f"equal-weighted dataset: +{len(new)} rows -> {len(merged)} total")
     merged.to_csv(EW_CSV, index_label="date", float_format="%.6f")
     return merged
 
@@ -111,6 +133,16 @@ def refresh_spx() -> pd.Series:
 
 
 def main() -> int:
+    import argparse
+    ap = argparse.ArgumentParser(description="Daily dispersion update / recompute")
+    ap.add_argument("--recompute-date", metavar="YYYY-MM-DD", default=None,
+                    help="Recompute and overwrite the stored row for this date "
+                         "(fixes a stale row from when data was temporarily bad). "
+                         "Re-fetches current prices; cap-weighted columns use "
+                         "current market caps as an approximation, equal-weighted "
+                         "columns are exact.")
+    args = ap.parse_args()
+
     DATA_DIR.mkdir(exist_ok=True)
     CAPS_DIR.mkdir(exist_ok=True)
     OUT_DIR.mkdir(exist_ok=True)
@@ -126,14 +158,30 @@ def main() -> int:
               "writing a bad row", file=sys.stderr)
         return 1
 
-    print("Downloading trailing prices...")
-    start = (pd.Timestamp.now("UTC") - pd.Timedelta(LOOKBACK)).strftime("%Y-%m-%d")
-    prices = dl.download_prices(tickers, start=start)
-    prices = prices.dropna(axis=1, how="all")
-    print(f"as of {prices.index[-1].date()}: {prices.shape[1]} stocks")
-
-    cw_hist = update_cap_weighted(prices, caps, members)
-    ew_hist = update_equal_weighted(prices)
+    if args.recompute_date:
+        target = pd.Timestamp(args.recompute_date).normalize()
+        # need history ending AT the target date, with enough lead for 12M
+        start = (target - pd.Timedelta("500d")).strftime("%Y-%m-%d")
+        end = (target + pd.Timedelta("1d")).strftime("%Y-%m-%d")
+        print(f"Recompute mode: fetching prices through {target.date()}...")
+        prices = dl.download_prices(tickers, start=start, end=end).dropna(axis=1, how="all")
+        prices = prices.loc[:target]
+        if len(prices) == 0 or prices.index[-1].normalize() != target:
+            print(f"target date {target.date()} not a trading day / not in data "
+                  f"(last available: {prices.index[-1].date() if len(prices) else 'none'})",
+                  file=sys.stderr)
+            return 1
+        cw_hist = update_cap_weighted(prices, caps, members, archive_caps=False)
+        ew_hist = update_equal_weighted(prices,
+                                        overwrite_dates=pd.DatetimeIndex([target]))
+        print(f"Recomputed {target.date()}. Rebuilding charts...")
+    else:
+        print("Downloading trailing prices...")
+        start = (pd.Timestamp.now("UTC") - pd.Timedelta(LOOKBACK)).strftime("%Y-%m-%d")
+        prices = dl.download_prices(tickers, start=start).dropna(axis=1, how="all")
+        print(f"as of {prices.index[-1].date()}: {prices.shape[1]} stocks")
+        cw_hist = update_cap_weighted(prices, caps, members)
+        ew_hist = update_equal_weighted(prices)
 
     print("Rebuilding charts...")
     try:
@@ -150,7 +198,7 @@ def main() -> int:
     dl.build_equal_weighted_charts(ew_hist, spx, OUT_DIR)
     dl.build_index_dashboard(ew_hist, cw_hist, spx, OUT_DIR)
 
-    print("Daily update complete.")
+    print("Done.")
     return 0
 
 

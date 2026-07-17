@@ -56,6 +56,7 @@ def update_cap_weighted(prices: pd.DataFrame, caps: pd.Series,
             print(f"not enough history for {label}", file=sys.stderr)
             continue
         rets = prices.iloc[-1] / prices.iloc[-1 - window] - 1.0
+        rets = dl.clean_extreme_returns(rets)  # drop split/adjustment glitches
         row[f"cw_spread_{label}"] = dl.decile_spread(rets, weights=caps)
         row[f"cw_xs_std_{label}"] = dl.cross_sectional_std(rets, weights=caps)
         row[f"ew_spread_{label}"] = dl.decile_spread(rets)

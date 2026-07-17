@@ -57,6 +57,17 @@ the dashboard's relative CSV download links working.
 | MAD | `cross_sectional_mad` | Median absolute deviation — robust to a few extreme movers. |
 | Interdecile range | `interdecile_range` | P90 − P10 — robust cousin of the decile spread. |
 
+**What "robust" means here:** a robust dispersion measure is one that's
+insensitive to outliers — a handful of stocks making extreme moves barely
+shifts it, whereas the decile spread (built entirely from the tails) and the
+cross-sectional std (which squares deviations) can both be dominated by a few
+names. MAD is the median absolute deviation of constituent returns from the
+cross-sectional median; the interdecile range is the 90th-minus-10th
+percentile return. The comparison is the point: when the decile spread rises
+but the robust measures don't, the "dispersion" is really a few extreme
+movers; when all rise together, the entire cross-section is genuinely
+differentiating.
+
 Horizons: 1, 3, 6, 12 months (21/63/126/252 trading days).
 
 ## Companion regime metrics (also computed)
@@ -72,6 +83,29 @@ Horizons: 1, 3, 6, 12 months (21/63/126/252 trading days).
 - **Average single-stock vol** vs index vol (implicit in the dashboard).
 - **Regime flags**: rolling 3-year percentile / z-score of any series;
   the dashboard highlights top-decile dispersion regimes in red.
+
+## Data-glitch guard
+
+Free Yahoo Finance data occasionally returns a split-adjusted price on one end
+of a return window and an unadjusted price on the other, manufacturing a fake
+multi-hundred-percent return for a single stock. Because the decile spread
+averages the extreme tails, even one such glitch can spike it (e.g. a "900%"
+12-month reading). To prevent this, single-stock horizon returns above +/-400%
+(and daily returns above +/-150%) are dropped before any metric is computed
+(`dispersion_lib.clean_extreme_returns`, constant `RETURN_CAP`). This is a
+conservative cap real S&P constituents essentially never breach; raise it if
+you specifically want to keep genuine multi-bagger moves.
+
+To investigate a spike, run:
+
+```bash
+python diagnose_spike.py --horizon 12M            # latest date
+python diagnose_spike.py --date 2026-07-14         # a specific date
+```
+
+It prints the top/bottom constituents by return with their raw prices at both
+ends of the window, and flags any name above the sanity threshold, so you can
+confirm whether a spike is a genuine broad move or one bad print.
 
 ## Caveats
 

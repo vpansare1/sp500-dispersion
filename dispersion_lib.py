@@ -181,9 +181,39 @@ def interdecile_range(returns_cs: pd.Series, min_names: int = 50) -> float:
 # Rolling (time-series) computations
 # ---------------------------------------------------------------------------
 
-def horizon_returns(prices: pd.DataFrame, window: int) -> pd.DataFrame:
-    """Total return over `window` trading days for every stock, every day."""
-    return prices / prices.shift(window) - 1.0
+# Single-stock horizon returns above this magnitude are almost always Yahoo
+# adjusted-close glitches (a split adjusted on one end of the window but not the
+# other), not real moves. They're dropped before any dispersion metric so one
+# bad print can't blow up the tails. Set via clean_extreme_returns(cap=...).
+# 4.0 = +400%: real 12-month S&P constituent returns essentially never exceed
+# this, so it's a safe cap; loosen it if you specifically want to keep genuine
+# multi-bagger moves.
+RETURN_CAP = 4.0
+
+
+def clean_extreme_returns(returns_cs: pd.Series, cap: float = RETURN_CAP) -> pd.Series:
+    """Drop constituent returns whose magnitude exceeds `cap` (glitch guard).
+
+    Returns are dropped rather than clipped: a clipped value would still sit in
+    the extreme tail and bias the decile spread, whereas a genuine glitch should
+    be excluded entirely. Pass cap=None to disable.
+    """
+    if cap is None:
+        return returns_cs
+    r = returns_cs.replace([np.inf, -np.inf], np.nan)
+    return r.where(r.abs() <= cap)
+
+
+def horizon_returns(prices: pd.DataFrame, window: int,
+                    cap: float = RETURN_CAP) -> pd.DataFrame:
+    """Total return over `window` trading days for every stock, every day.
+
+    Applies the extreme-return glitch guard (see clean_extreme_returns).
+    """
+    r = prices / prices.shift(window) - 1.0
+    if cap is not None:
+        r = r.where(r.abs() <= cap)
+    return r
 
 
 def rolling_dispersion(prices: pd.DataFrame,
@@ -293,6 +323,9 @@ def compute_equal_weighted_metrics(prices: pd.DataFrame,
     is evaluated; use 5 for a 30y backfill, 1 for short incremental windows.
     """
     daily_rets = prices.pct_change(fill_method=None)
+    # guard against single-day split/adjustment glitches (a daily return above
+    # ~150% is not a real S&P move); protects correlation and vol dispersion
+    daily_rets = daily_rets.where(daily_rets.abs() <= 1.5)
     spread = rolling_dispersion(prices, metric="decile_spread", min_names=min_names)
     xs_std = rolling_dispersion(prices, metric="xs_std", min_names=min_names)
     mad12 = rolling_dispersion(prices, horizons={"12M": 252}, metric="mad",

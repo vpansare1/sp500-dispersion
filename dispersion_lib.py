@@ -71,9 +71,30 @@ def get_sp500_constituents() -> pd.DataFrame:
     return out.drop_duplicates("ticker").reset_index(drop=True)
 
 
+class InsufficientDataError(RuntimeError):
+    """Raised when a price download returns too few tickers to trust.
+
+    yfinance intermittently returns near-empty responses (rate limiting,
+    transient server errors). Writing a dispersion row from such a response
+    produces garbage (e.g. a decile spread computed from 67 of 500 stocks), so
+    callers should abort rather than persist the result.
+    """
+
+
 def download_prices(tickers: list[str], start: str = "1994-01-01",
-                    end: str | None = None, batch_size: int = 100) -> pd.DataFrame:
+                    end: str | None = None, batch_size: int = 100,
+                    retries: int = 3, min_coverage: float = 0.90,
+                    require_coverage: bool = False) -> pd.DataFrame:
     """Download adjusted close prices from Yahoo Finance in batches.
+
+    Robustness against yfinance's intermittent bad pulls:
+    - each batch is retried up to `retries` times (with backoff) if it comes
+      back empty, so one flaky request doesn't silently drop ~100 stocks;
+    - if `require_coverage` is True, raises InsufficientDataError when fewer
+      than `min_coverage` of the requested tickers return any data at all.
+      The daily job sets this so a thin response never writes a corrupt row;
+      the long historical backfill leaves it False (some current tickers
+      legitimately lack 30y of history).
 
     Returns a DataFrame: index = dates, columns = tickers.
     """
@@ -82,16 +103,43 @@ def download_prices(tickers: list[str], start: str = "1994-01-01",
     frames = []
     for i in range(0, len(tickers), batch_size):
         batch = tickers[i:i + batch_size]
-        data = yf.download(batch, start=start, end=end, auto_adjust=True,
-                           progress=False, group_by="column", threads=True)
-        closes = data["Close"] if isinstance(data.columns, pd.MultiIndex) else data[["Close"]]
-        if isinstance(closes, pd.Series):
-            closes = closes.to_frame(batch[0])
-        frames.append(closes)
-        time.sleep(1)  # be polite to Yahoo
+        closes = None
+        for attempt in range(retries):
+            try:
+                data = yf.download(batch, start=start, end=end, auto_adjust=True,
+                                   progress=False, group_by="column", threads=True)
+            except Exception as exc:  # noqa: BLE001 - network flakiness
+                warnings.warn(f"batch {i//batch_size} attempt {attempt+1} failed: {exc}")
+                data = None
+            if data is not None and len(data):
+                closes = (data["Close"] if isinstance(data.columns, pd.MultiIndex)
+                          else data[["Close"]])
+                if isinstance(closes, pd.Series):
+                    closes = closes.to_frame(batch[0])
+                # accept the batch only if it actually carries some values
+                if closes.notna().any().any():
+                    break
+            time.sleep(2 * (attempt + 1))  # backoff before retry
+            closes = None
+        if closes is not None:
+            frames.append(closes)
+        time.sleep(1)  # be polite to Yahoo between batches
+
+    if not frames:
+        raise InsufficientDataError("price download returned no data at all")
     prices = pd.concat(frames, axis=1)
-    prices = prices.loc[:, ~prices.columns.duplicated()]
-    return prices.sort_index()
+    prices = prices.loc[:, ~prices.columns.duplicated()].sort_index()
+
+    # coverage = fraction of requested tickers that returned at least one price
+    got = int(prices.notna().any().sum())
+    coverage = got / max(len(tickers), 1)
+    if require_coverage and coverage < min_coverage:
+        raise InsufficientDataError(
+            f"only {got}/{len(tickers)} tickers returned data "
+            f"({coverage:.0%} < {min_coverage:.0%} required) -- likely a "
+            "throttled/failed Yahoo pull; aborting rather than writing a "
+            "thin, corrupt row")
+    return prices
 
 
 def get_market_caps(tickers: list[str]) -> pd.Series:

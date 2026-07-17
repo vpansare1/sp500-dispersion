@@ -84,6 +84,41 @@ Horizons: 1, 3, 6, 12 months (21/63/126/252 trading days).
 - **Regime flags**: rolling 3-year percentile / z-score of any series;
   the dashboard highlights top-decile dispersion regimes in red.
 
+## Bad-fetch guard
+
+yfinance intermittently returns near-empty responses (rate limiting, transient
+server errors). A dispersion row computed from a thin response is garbage -- a
+real incident wrote a 12-month cap-weighted spread of 1400% from a day where
+only 67 of ~500 stocks came back. Three layers now prevent this:
+
+1. **Per-batch retry** -- each batch of ~100 tickers is retried up to 3 times
+   with backoff before being given up on, so one flaky request doesn't
+   silently drop 100 stocks (`download_prices(retries=...)`).
+2. **Coverage check** -- the daily job calls `download_prices(require_coverage=
+   True)`, which raises `InsufficientDataError` if fewer than 90% of requested
+   tickers return any data. The backfill leaves this off (some current tickers
+   legitimately lack 30y of history).
+3. **Cross-section check** -- before writing a row, the as-of date must have
+   >=400 stocks with a price; otherwise it aborts.
+
+On any of these the daily job exits non-zero, writes no row, and changes no
+charts (it's idempotent -- the next run fixes it). If a bad row was already
+stored before these guards existed, fix it with `--recompute-date` (below).
+
+## Recomputing a stale/bad row
+
+If a corrupt row was persisted (e.g. from a thin fetch before the guards, or a
+price Yahoo later revised), recompute it from current data:
+
+```bash
+python daily_update.py --recompute-date 2026-07-14
+```
+
+This re-fetches (with coverage enforced), overwrites just that date's row, and
+rebuilds the charts. Equal-weighted columns are exact; cap-weighted columns use
+current market caps as an approximation (historical caps aren't freely
+available).
+
 ## Data-glitch guard
 
 Free Yahoo Finance data occasionally returns a split-adjusted price on one end

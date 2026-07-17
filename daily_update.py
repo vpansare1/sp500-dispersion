@@ -58,6 +58,13 @@ def update_cap_weighted(prices: pd.DataFrame, caps: pd.Series,
     approximation -- the equal-weighted columns in the same row are exact.
     """
     asof = prices.index[-1]
+    # even with good overall coverage, the final-date cross-section can be thin
+    # if many stocks lack that day's price; refuse to write a row from too few
+    n_asof = int(prices.iloc[-1].notna().sum())
+    if n_asof < 400:
+        raise dl.InsufficientDataError(
+            f"only {n_asof} stocks have a price on {asof.date()}; "
+            "cross-section too thin to compute reliable dispersion")
     row: dict[str, float] = {}
     for label, window in dl.HORIZONS.items():
         if len(prices) <= window:
@@ -158,30 +165,38 @@ def main() -> int:
               "writing a bad row", file=sys.stderr)
         return 1
 
-    if args.recompute_date:
-        target = pd.Timestamp(args.recompute_date).normalize()
-        # need history ending AT the target date, with enough lead for 12M
-        start = (target - pd.Timedelta("500d")).strftime("%Y-%m-%d")
-        end = (target + pd.Timedelta("1d")).strftime("%Y-%m-%d")
-        print(f"Recompute mode: fetching prices through {target.date()}...")
-        prices = dl.download_prices(tickers, start=start, end=end).dropna(axis=1, how="all")
-        prices = prices.loc[:target]
-        if len(prices) == 0 or prices.index[-1].normalize() != target:
-            print(f"target date {target.date()} not a trading day / not in data "
-                  f"(last available: {prices.index[-1].date() if len(prices) else 'none'})",
-                  file=sys.stderr)
-            return 1
-        cw_hist = update_cap_weighted(prices, caps, members, archive_caps=False)
-        ew_hist = update_equal_weighted(prices,
-                                        overwrite_dates=pd.DatetimeIndex([target]))
-        print(f"Recomputed {target.date()}. Rebuilding charts...")
-    else:
-        print("Downloading trailing prices...")
-        start = (pd.Timestamp.now("UTC") - pd.Timedelta(LOOKBACK)).strftime("%Y-%m-%d")
-        prices = dl.download_prices(tickers, start=start).dropna(axis=1, how="all")
-        print(f"as of {prices.index[-1].date()}: {prices.shape[1]} stocks")
-        cw_hist = update_cap_weighted(prices, caps, members)
-        ew_hist = update_equal_weighted(prices)
+    try:
+        if args.recompute_date:
+            target = pd.Timestamp(args.recompute_date).normalize()
+            # need history ending AT the target date, with enough lead for 12M
+            start = (target - pd.Timedelta("500d")).strftime("%Y-%m-%d")
+            end = (target + pd.Timedelta("1d")).strftime("%Y-%m-%d")
+            print(f"Recompute mode: fetching prices through {target.date()}...")
+            prices = dl.download_prices(tickers, start=start, end=end,
+                                        require_coverage=True).dropna(axis=1, how="all")
+            prices = prices.loc[:target]
+            if len(prices) == 0 or prices.index[-1].normalize() != target:
+                print(f"target date {target.date()} not a trading day / not in data "
+                      f"(last available: {prices.index[-1].date() if len(prices) else 'none'})",
+                      file=sys.stderr)
+                return 1
+            cw_hist = update_cap_weighted(prices, caps, members, archive_caps=False)
+            ew_hist = update_equal_weighted(prices,
+                                            overwrite_dates=pd.DatetimeIndex([target]))
+            print(f"Recomputed {target.date()}. Rebuilding charts...")
+        else:
+            print("Downloading trailing prices...")
+            start = (pd.Timestamp.now("UTC") - pd.Timedelta(LOOKBACK)).strftime("%Y-%m-%d")
+            prices = dl.download_prices(tickers, start=start,
+                                        require_coverage=True).dropna(axis=1, how="all")
+            print(f"as of {prices.index[-1].date()}: {prices.shape[1]} stocks")
+            cw_hist = update_cap_weighted(prices, caps, members)
+            ew_hist = update_equal_weighted(prices)
+    except dl.InsufficientDataError as exc:
+        print(f"ABORT: {exc}", file=sys.stderr)
+        print("No row written and no charts changed; re-run later "
+              "(the daily job is idempotent).", file=sys.stderr)
+        return 1
 
     print("Rebuilding charts...")
     try:

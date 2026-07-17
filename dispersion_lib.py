@@ -389,7 +389,8 @@ def build_equal_weighted_charts(df: pd.DataFrame, spx: pd.Series,
     out = Path(out_dir)
     out.mkdir(exist_ok=True)
     for name, fig in _equal_weighted_figures(df, spx):
-        fig.write_html(out / f"{name}.html", include_plotlyjs="cdn")
+        _write_html(fig, out / f"{name}.html", div_id=name + "_plot",
+                    include_js="cdn")
 
 
 def build_cap_weighted_charts(hist: pd.DataFrame, out_dir) -> None:
@@ -399,7 +400,8 @@ def build_cap_weighted_charts(hist: pd.DataFrame, out_dir) -> None:
     out = Path(out_dir)
     out.mkdir(exist_ok=True)
     for name, fig in _cap_weighted_figures(hist):
-        fig.write_html(out / f"{name}.html", include_plotlyjs="cdn")
+        _write_html(fig, out / f"{name}.html", div_id=name + "_plot",
+                    include_js="cdn")
 
 
 # ---------------------------------------------------------------------------
@@ -573,8 +575,10 @@ def build_index_dashboard(ew: pd.DataFrame, cw: pd.DataFrame | None,
     for name, fig in sections:
         title = fig.layout.title.text or name
         nav.append(f'<a href="#{name}">{title.split(" - ")[0]}</a>')
-        inner = fig.to_html(full_html=False, div_id=name + "_plot",
+        div_id = name + "_plot"
+        inner = fig.to_html(full_html=False, div_id=div_id,
                             include_plotlyjs="cdn" if first else False,
+                            config=_PLOT_CONFIG,
                             default_height="560px"
                             if name != "regime_dashboard" else "1100px")
         first = False
@@ -620,6 +624,22 @@ def build_index_dashboard(ew: pd.DataFrame, cw: pd.DataFrame | None,
 
 _COLORS = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b"]
 
+# Interaction config shared by every exported figure. Native plotly zoom:
+# drag a box to zoom both axes, scroll to zoom, drag an axis edge to zoom that
+# axis alone, double-click to reset. Modebar also has pan and single-axis zoom.
+_PLOT_CONFIG = {
+    "scrollZoom": True,
+    "displaylogo": False,
+    "modeBarButtonsToAdd": ["toggleSpikelines", "hoverclosest", "hovercompare"],
+    "toImageButtonOptions": {"format": "png", "scale": 2},
+}
+
+
+def _write_html(fig, path, div_id, include_js) -> None:
+    """Write a figure to standalone HTML with the shared zoom/pan config."""
+    fig.write_html(path, include_plotlyjs=include_js, div_id=div_id,
+                   config=_PLOT_CONFIG)
+
 
 def plot_dispersion(df: pd.DataFrame, title: str, yaxis_title: str = "Dispersion",
                     benchmark: pd.Series | None = None,
@@ -627,8 +647,8 @@ def plot_dispersion(df: pd.DataFrame, title: str, yaxis_title: str = "Dispersion
                     subtitle: str | None = None) -> "go.Figure":
     """Multi-horizon dispersion lines, optional index level on a log right axis.
 
-    Header layout (top to bottom, non-overlapping): title [+ subtitle],
-    legend row, range-selector buttons, then the plot.
+    Native plotly interaction: drag a box to zoom both axes, scroll to zoom,
+    drag an axis edge to zoom one axis, double-click to reset.
     """
     import plotly.graph_objects as go
 
@@ -653,21 +673,8 @@ def plot_dispersion(df: pd.DataFrame, title: str, yaxis_title: str = "Dispersion
     fig.update_layout(
         title=title_block, template="plotly_white", hovermode="x unified",
         yaxis=dict(title=yaxis_title, tickformat=".1%"),
-        # one header row above the plot: range-selector buttons on the left,
-        # legend right-aligned -- vertically separated from the title at any
-        # window height (a stacked layout drifts because paper coordinates
-        # scale with plot height)
-        legend=dict(orientation="h", yanchor="bottom", y=1.03,
-                    xanchor="right", x=1),
-        xaxis=dict(rangeslider=dict(visible=True), rangeselector=dict(
-            x=0, xanchor="left", y=1.03, yanchor="bottom",
-            buttons=[
-                dict(count=1, label="1y", step="year", stepmode="backward"),
-                dict(count=5, label="5y", step="year", stepmode="backward"),
-                dict(count=10, label="10y", step="year", stepmode="backward"),
-                dict(step="all"),
-            ])),
-        margin=dict(t=140 if subtitle else 115),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
+        margin=dict(t=110 if subtitle else 85),
     )
     return fig
 
@@ -714,6 +721,7 @@ def plot_regime_dashboard(dispersion: pd.Series, corr: pd.Series,
     fig.update_yaxes(tickformat=".0%", row=4, col=1)
 
     fig.update_layout(template="plotly_white", height=1100, hovermode="x unified",
+                      dragmode="zoom",
                       title=dict(text="S&P 500 dispersion regime dashboard",
                                  yref="container", yanchor="top", y=0.992),
                       legend=dict(orientation="h", yanchor="bottom", y=1.022,

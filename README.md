@@ -119,28 +119,16 @@ rebuilds the charts. Equal-weighted columns are exact; cap-weighted columns use
 current market caps as an approximation (historical caps aren't freely
 available).
 
-## Data-glitch guard
+## No return cap (rely on fetch guards)
 
-Free Yahoo Finance data occasionally returns a split-adjusted price on one end
-of a return window and an unadjusted price on the other, manufacturing a fake
-multi-hundred-percent return for a single stock. Because the decile spread
-averages the extreme tails, even one such glitch can spike it (e.g. a "900%"
-12-month reading). To prevent this, single-stock horizon returns above +/-400%
-(and daily returns above +/-150%) are dropped before any metric is computed
-(`dispersion_lib.clean_extreme_returns`, constant `RETURN_CAP`). This is a
-conservative cap real S&P constituents essentially never breach; raise it if
-you specifically want to keep genuine multi-bagger moves.
-
-To investigate a spike, run:
-
-```bash
-python diagnose_spike.py --horizon 12M            # latest date
-python diagnose_spike.py --date 2026-07-14         # a specific date
-```
-
-It prints the top/bottom constituents by return with their raw prices at both
-ends of the window, and flags any name above the sanity threshold, so you can
-confirm whether a spike is a genuine broad move or one bad print.
+An earlier version dropped single-stock returns above +/-400% as presumed
+split/adjustment glitches. That was removed: it discarded *genuine* extreme
+moves (semiconductor names up 500-750% in the 2026 memory supercycle were real,
+not glitches) and pulled dispersion artificially low on exactly the days that
+mattered. Bad-data protection now lives entirely in the download layer (retry +
+coverage + cross-section guards, above), which targets the true failure mode --
+thin/failed Yahoo pulls -- without touching legitimate returns. `dispersion_lib.
+clean_extreme_returns` remains only as an inf/NaN cleaner.
 
 ## Caveats
 

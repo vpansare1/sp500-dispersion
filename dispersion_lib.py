@@ -642,7 +642,7 @@ def build_index_dashboard(ew: pd.DataFrame, cw: pd.DataFrame | None,
                             include_plotlyjs="cdn" if first else False,
                             config=_PLOT_CONFIG,
                             default_height="560px"
-                            if name != "regime_dashboard" else "1100px")
+                            if name != "regime_dashboard" else f"{DASHBOARD_HEIGHT}px")
         first = False
         desc = _CHART_DESCRIPTIONS.get(name, "")
         desc_html = f'<p class="desc">{desc}</p>' if desc else ""
@@ -741,6 +741,9 @@ def plot_dispersion(df: pd.DataFrame, title: str, yaxis_title: str = "Dispersion
     return fig
 
 
+DASHBOARD_HEIGHT = 1200  # px; extra room for per-panel date labels
+
+
 def plot_regime_dashboard(dispersion: pd.Series, corr: pd.Series,
                           vol_disp: pd.Series, benchmark: pd.Series,
                           dispersion_name: str = "12M decile spread") -> "go.Figure":
@@ -751,7 +754,7 @@ def plot_regime_dashboard(dispersion: pd.Series, corr: pd.Series,
 
     pct = regime_percentile(dispersion)
     fig = make_subplots(
-        rows=4, cols=1, shared_xaxes=True, vertical_spacing=0.04,
+        rows=4, cols=1, shared_xaxes=True, vertical_spacing=0.075,
         row_heights=[0.28, 0.28, 0.22, 0.22],
         subplot_titles=(
             "S&P 500 (log scale)", f"Return dispersion: {dispersion_name}",
@@ -782,7 +785,12 @@ def plot_regime_dashboard(dispersion: pd.Series, corr: pd.Series,
                              line=dict(color="#9467bd", width=1.4)), row=4, col=1)
     fig.update_yaxes(tickformat=".0%", row=4, col=1)
 
-    fig.update_layout(template="plotly_white", height=1100, hovermode="x unified",
+    # shared_xaxes hides tick labels on all but the bottom panel; show dates
+    # under every panel (zoom/pan stays linked across all four)
+    fig.update_xaxes(showticklabels=True)
+
+    fig.update_layout(template="plotly_white", height=DASHBOARD_HEIGHT,
+                      hovermode="x unified",
                       dragmode="zoom",
                       title=dict(text="S&P 500 dispersion regime dashboard",
                                  yref="container", yanchor="top", y=0.992),

@@ -139,6 +139,33 @@ def refresh_spx() -> pd.Series:
     return spx
 
 
+def drop_thin_dates(prices: pd.DataFrame, frac: float = 0.9) -> pd.DataFrame:
+    """Remove intermediate trading days where Yahoo returned prices for only a
+    fraction of the universe.
+
+    The as-of guard in update_cap_weighted only checks the LATEST date. But the
+    equal-weighted step back-fills every date since the last stored row, so a
+    thin day in the middle of the window (e.g. a day whose own run aborted)
+    would otherwise be written from a handful of stocks -- this is how
+    2026-09-22 got stored from 60 of 503 names, which also distorted the next
+    day's vol/correlation columns. Dropping the thin row means that date is
+    simply skipped (fix it later with --recompute-date) instead of stored wrong.
+
+    The final row is left alone so the existing as-of check still aborts the
+    run when today's data is thin.
+    """
+    counts = prices.notna().sum(axis=1)
+    threshold = frac * counts.median()
+    thin = counts < threshold
+    thin.iloc[-1] = False
+    if thin.any():
+        bad = ", ".join(f"{d.date()} ({int(counts[d])} stocks)" for d in counts[thin].index)
+        print(f"WARNING: skipping thin price rows: {bad}. These dates will be "
+              "missing from the dataset; once Yahoo has the data, fill them "
+              "with --recompute-date.", file=sys.stderr)
+    return prices.loc[~thin]
+
+
 def main() -> int:
     import argparse
     ap = argparse.ArgumentParser(description="Daily dispersion update / recompute")
@@ -174,7 +201,7 @@ def main() -> int:
             print(f"Recompute mode: fetching prices through {target.date()}...")
             prices = dl.download_prices(tickers, start=start, end=end,
                                         require_coverage=True).dropna(axis=1, how="all")
-            prices = prices.loc[:target]
+            prices = drop_thin_dates(prices.loc[:target])
             if len(prices) == 0 or prices.index[-1].normalize() != target:
                 print(f"target date {target.date()} not a trading day / not in data "
                       f"(last available: {prices.index[-1].date() if len(prices) else 'none'})",
@@ -189,6 +216,7 @@ def main() -> int:
             start = (pd.Timestamp.now("UTC") - pd.Timedelta(LOOKBACK)).strftime("%Y-%m-%d")
             prices = dl.download_prices(tickers, start=start,
                                         require_coverage=True).dropna(axis=1, how="all")
+            prices = drop_thin_dates(prices)
             print(f"as of {prices.index[-1].date()}: {prices.shape[1]} stocks")
             cw_hist = update_cap_weighted(prices, caps, members)
             ew_hist = update_equal_weighted(prices)
